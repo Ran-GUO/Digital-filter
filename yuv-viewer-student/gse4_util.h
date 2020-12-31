@@ -1,0 +1,366 @@
+//
+// header-start
+//////////////////////////////////////////////////////////////////////////////////
+//
+// \file      gse4_util.h
+//
+// \brief     This file belongs to the C++ tutorial project
+//
+// \author    Bernard
+//
+// \copyright Copyright 2019
+//            Distributed under the MIT License
+//            See http://opensource.org/licenses/MIT
+//
+//////////////////////////////////////////////////////////////////////////////////
+// header-end
+//
+
+#pragma once
+
+#ifdef USE_SPLINE
+#include <Eigen/Dense>
+#endif
+
+#include <vector>
+#include <string>
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+
+
+namespace GSE4 {
+
+
+class PWLinear {
+ private:
+  size_t dim_;
+  std::vector<double> xs_;
+  std::vector<double> as_;
+  std::vector<double> bs_;
+
+ public:
+  //
+  // constructor
+  //
+  PWLinear(const std::vector<double> &xs, const std::vector<double> &ys) : xs_{xs}, bs_{ys} {
+
+    dim_ = xs.size();
+
+    // Note: the line xs_ and bs_ are already initialized
+
+    auto xN = 1.0;
+    xs_.push_back(xN);
+    bs_.push_back(ys[0]);
+
+    for (size_t i = 0; i < dim_; ++i) {
+
+      auto ai = (bs_[i+1] - bs_[i]) / (xs_[i+1] - xs_[i]);
+      as_.push_back(ai);
+      
+    }
+  }
+
+
+  double get_value(const double x) const {
+    if (x <= 0.0 || x >= 1.0) {
+      return bs_[0];
+    }
+
+    for (size_t i = 1; i < xs_.size(); ++i) {
+      if (x < xs_[i]) {
+        --i;
+        double delta = x - xs_[i];
+        return bs_[i] +  delta * as_[i];
+      }
+    }
+    //assert(false && "must never be here");
+    return 0.0;
+  }
+};
+
+#ifdef USE_SPLINE
+class Spline {
+ private:
+  size_t dim_;
+  std::vector<double> xs_;
+  std::vector<double> as_;
+  std::vector<double> bs_;
+  std::vector<double> cs_;
+  std::vector<double> ds_;
+
+ public:
+  //
+  // constructor
+  //
+  Spline(const std::vector<double> &xs, const std::vector<double> &ys) : xs_{xs}, ds_{ys} {
+    dim_ = xs.size();
+    Eigen::MatrixXd ma(3 * dim_, 3 * dim_);
+    Eigen::VectorXd b(3 * dim_);
+
+    ma.setZero();
+    b.setZero();
+
+    // Note: the line xs_ and ds_ are already initialized
+
+    auto xN = 1.0;
+    xs_.push_back(xN);
+
+
+    ds_.push_back(ys[0]);
+
+
+    // Fill the matrix ma 
+    // note1: ma(row, col)
+    // note2: 23 lines of code, including 3 curly braces
+
+    for (size_t i = 0; i < dim_; ++i) {
+      int bi = 3 * i;
+
+      //
+      // ROW[0] of Bi
+      //
+      // R_i(x)  = a[i]*(x-xi)^3 + b[i]*(x-xi)^2 + c[i]*(x-xi) + d[i]
+      //
+      // We enter the condition: R_i(x[i+1])  = y[i+1]
+      //
+
+      auto delta = xs_[i + 1] - xs_[i];
+
+      ma(bi, bi + 0) = delta * delta * delta;
+      ma(bi, bi + 1) = delta * delta;
+      ma(bi, bi + 2) = delta;
+
+      b(bi) = ds_[i + 1] - ds_[i];
+
+
+      if (i != (dim_ - 1)) {
+
+        //
+        // ROW[1] of Bi
+        // first derivative
+        //
+        // R'_i(x)  = 3*a[i]*(x-xi)^2 + 2*b[i]*(x-xi) + c[i]
+        //
+        // We enter the condition:
+        // R'_i(x[i+1]) = R'_{i+1}(x[i+1])
+        //
+
+        ma(bi + 1, bi + 0) = 3 * delta * delta;
+        ma(bi + 1, bi + 1) = 2 * delta;
+        ma(bi + 1, bi + 2) = 1.0;
+
+        ma(bi + 1, bi + 3 + 2) = -1.0;
+
+        //
+        // ROW[2] of Bi
+        // second derivative
+        //
+        // R''_i(x)  = 6*a[i]*(x-xi) + 2*b[i]
+        //
+        // We enter the condition:
+        // R''_i(x[i+1]) = R''_{i+1}(x[i+1])
+        //
+
+        ma(bi + 2, bi + 0) = 6 * delta;
+        ma(bi + 2, bi + 1) = 2.0;
+
+        ma(bi + 2, bi + 3 + 1) = -2.0;
+
+      } else {
+
+        // Special cases
+        // We enter the boundary conditions
+        // on the first derivative
+        // R'_0(x[0]) = 0      => ROW[1] of last band
+        // R'_{N-1}(x[N]) = 0  => ROW[2] of last band
+
+        ma(bi + 1,  2) = 1.0;
+
+        ma(bi + 2,  bi + 0) = 3 * delta * delta;
+        ma(bi + 2,  bi + 1) = 2 * delta;
+        ma(bi + 2,  bi + 2) = 1.0;
+      }
+    }
+
+    // Solve M.X=B => X = M^1.B
+
+    Eigen::VectorXd x = ma.fullPivHouseholderQr().solve(b);
+
+    // Fill in the ai, bi and ci
+
+    for (size_t i = 0; i < dim_; ++i) {
+      int bi = 3 * i;
+      as_.push_back(x[bi + 0]);
+      bs_.push_back(x[bi + 1]);
+      cs_.push_back(x[bi + 2]);
+    }
+
+  }
+
+
+  double get_value(const double x) const {
+    if (x <= 0.0 || x >= 1.0) {
+      return ds_[0];
+    }
+
+    // using a linear search => can be optimized with a binary search
+    // code is simple to read, but performance not optimal for large xs_ vector
+    //
+
+    for (size_t i = 1; i < xs_.size(); ++i) {
+      if (x < xs_[i]) {
+        --i;
+        double delta = x - xs_[i];
+        return ds_[i] +  delta * (cs_[i] + delta * (bs_[i] + (delta * as_[i])));
+      }
+    }
+
+    assert(false && "must never be here");
+    return 0.0;
+  }
+
+  void gnuplot(const std::string &filename) const {
+    // dump on a file in gnuplot format
+    //
+    std::cout << "Writing gnuplot file \"" << filename << "\"" << std::endl;
+
+    std::ofstream gnu_plot_os("spline.gp", std::ios::out | std::ios::trunc);
+    gnu_plot_os << "# file generated by spline_3n.exe" << std::endl;
+    gnu_plot_os << "#"  << std::endl;
+    gnu_plot_os << "reset session" << std::endl;
+    gnu_plot_os << "set title \"Circular Cubic Spline\"" << std::endl;
+    gnu_plot_os << "set grid x y" << std::endl;
+    gnu_plot_os << "set xrange [-0.1:1.1]" << std::endl;
+    gnu_plot_os << "set ytics nomirror" << std::endl;
+    gnu_plot_os << "set autoscale y" << std::endl;
+    gnu_plot_os << "set style data lines" << std::endl;
+    gnu_plot_os << "set style line 1 linecolor  rgb \"red\"   linewidth 2 pointtype 7" << std::endl;
+    gnu_plot_os << "set style line 2 linecolor  rgb \"blue\"  linewidth 2" << std::endl;
+    gnu_plot_os << "plot '-' using 1:2 with linespoints linestyle 1 title \"Linear\""
+                    << ",'-' using 1:2 linestyle 2 title \"Cubic Spline\""
+                    << std::endl;
+
+    for (size_t i = 0; i < xs_.size(); ++i) {
+      gnu_plot_os << std::setw(8) << xs_[i] << " "
+                  << std::setw(8) << ds_[i] << std::endl;
+    }
+
+    gnu_plot_os << "e" << std::endl;
+    for (double x = -0.1; x <= 1.1; x += 0.01) {
+      double y = get_value(x);
+      gnu_plot_os << std::setw(8) << x << " "
+                  << std::setw(8) << y << std::endl;
+    }
+  }
+};
+
+#endif
+
+
+//
+// class with a functor to linearly interpolate
+// a y value for a given x value
+// if |x0 - x1| == 0 => vertical line
+// we return y0
+//
+//     |
+// y0  =   ...
+//     |      ....
+// y1  =          ....
+//     |
+//    -----+----------+---------
+//       x0           x1
+//
+//  (y - y0) = (y1 - y0)*(x - x0)/(x1 - x0)
+//
+class LinearInterpolate {
+private:
+  double x0_;
+  double x1_;
+  double y0_;
+  double y1_;
+  double slope_;
+  bool valid_slope_;
+
+public:
+  LinearInterpolate() {
+     x0_ = 0;
+     x1_ = 1;
+     y0_ = 0;
+     y1_ = 1;
+     slope_ = 1;
+     valid_slope_ = true;
+  }
+  LinearInterpolate(double x0, double x1, double y0, double y1)
+    : x0_{x0}, x1_{x1}, y0_{y0}, y1_{y1} {
+
+     if (x0 != x1) {
+       valid_slope_ = true;
+       slope_ = (y1_ - y0_) / (x1_ - x0_);
+     } else {
+       valid_slope_ = false;
+       slope_ = 0.0;
+     }
+  }
+  double operator()(int x) {
+    return ((static_cast<double>(x) - x0_) * slope_) + y0_;
+  }
+
+  double operator()(double x) {
+    return ((x - x0_) * slope_) + y0_;
+  }
+};
+
+//
+// Clamp class functor
+//
+template<typename tpl_t>
+class Clamp {
+private:
+  int min_;
+  int max_;
+public:
+  int operator()(tpl_t value) {
+    int tmp = static_cast<int>(value);
+    return (tmp < min_) ? min_ : ((tmp > max_) ? max_ : tmp);
+  }
+  Clamp(int min, int max) : min_{min}, max_{max} {
+  }
+};
+
+//
+// Commify class functor
+// thousand digit separator
+// 1234 => 1,234
+//
+
+template<typename T>
+class Commify {
+private:
+  std::string str_;
+  void insert_separator(char c) {
+    if (str_.length() <= 3) {
+      return;
+    }
+    size_t pos = str_.length() - 3;
+    for(;;) {
+      str_.insert(pos, 1, c);
+      if (pos <= 3) return;
+      pos -= 3;
+    }
+  }
+public:
+  explicit Commify(T value) {
+    std::ostringstream ss;
+    ss << value;
+    str_ = ss.str();
+    insert_separator(',');
+  }
+  friend std::ostream& operator<<(std::ostream &os, const Commify<T> &c) {
+    os << c.str_;
+    return os;
+  }
+};
+
+}  // namespace GSE4
